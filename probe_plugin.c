@@ -118,6 +118,7 @@ static spindle_set_state_ptr on_spindle_set_state = NULL;
 static on_tool_selected_ptr on_tool_selected = NULL;
 static on_tool_changed_ptr on_tool_changed = NULL; 
 static probe_get_state_ptr probe_get_state = NULL;
+static probe_get_state_ptr SLB_get_state = NULL;
 
 static void set_connected_status(uint_fast16_t state);
 
@@ -181,6 +182,21 @@ static probe_state_t probeGetState (void)
 
     if(probe_protect_settings.flags.tool_pin_inv)
         state.triggered = !state.triggered;   
+
+    return state;
+}
+
+// redirected probing function for SLB OR.
+static probe_state_t probeSLBGetState (void)
+{
+    probe_state_t state = {0};
+
+    //get the probe state from the HAL
+    state = SLB_get_state();
+    //get the probe state from the plugin
+
+    //OR the result and return.
+    state.triggered |= hal.port.wait_on_input(Port_Digital, tool_probe_port, WaitMode_Immediate, 0.0f) ^ settings.probe.invert_probe_pin; 
 
     return state;
 }
@@ -422,7 +438,7 @@ static void mcode_execute (uint_fast16_t state, parser_block_t *gc_block)
 static void probe_reset (void)
 {
     settings.probe.invert_probe_pin = nvs_invert_probe_pin;
-    hal.limits.enable(settings.limits.flags.hard_enabled, nvs_hardlimits);  //restore hard limit settings.
+    //hal.limits.enable(settings.limits.flags.hard_enabled, nvs_hardlimits);  //restore hard limit settings.
     //probe_connected.value = 0;  //seems like it is best for this to survive reset.
     //protocol_enqueue_rt_command(set_connected_status);
     probe_state_t probe = hal.probe.get_state();
@@ -436,62 +452,18 @@ static void report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt) {
-        hal.stream.write("[PLUGIN:Probe Protection v0.01]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:SLB Probing v0.01]" ASCII_EOL);
     }       
 }
 
 static void warning_msg (uint_fast16_t state)
 {
-    report_message("Probe protect plugin failed to initialize!", Message_Warning);
+    report_message("Probe plugin failed to initialize!", Message_Warning);
 }
-
-// Add info about our settings for $help and enumerations.
-// Potentially used by senders for settings UI.
-static const setting_group_detail_t user_groups [] = {
-    { Group_Root, Group_Probing, "Probe Protection"}
-};
-
-static const setting_detail_t user_settings[] = {
-    { PROBE_PLUGIN_PORT_SETTING1, Group_Probing, "Probe Connected Aux Input", NULL, Format_Int8, "#0", "0", max_port, Setting_NonCore, &probe_protect_settings.protect_port, NULL, NULL },
-    { PROBE_PLUGIN_PORT_SETTING2, Group_Probing, "Tool Probe Aux Input", NULL, Format_Int8, "#0", "0", max_port, Setting_NonCore, &probe_protect_settings.tool_port, NULL, NULL },    
-    { PROBE_PLUGIN_FIXTURE_INVERT_LIMIT_SETTING, Group_Probing, "Probe Protection Flags", NULL, Format_Bitfield, "Invert Tool Probe, External Connected Pin, Invert External Connected Pin, Alternate Tool Probe Pin, Invert Tool Probe Pin, Enable Motion Protection", NULL, NULL, Setting_NonCore, &probe_protect_settings.flags, NULL, NULL },   
-};
-
-#ifndef NO_SETTINGS_DESCRIPTIONS
-
-static const setting_descr_t probe_protect_settings_descr[] = {
-    { PROBE_PLUGIN_PORT_SETTING1, "Aux input port number to use for probe connected control.\\n\\n"
-                            "NOTE: A hard reset of the controller is required after changing this setting."
-    },
-    { PROBE_PLUGIN_PORT_SETTING2, "Aux input port number to use for tool probing at G59.3.\\n\\n"
-                            "NOTE: A hard reset of the controller is required after changing this setting."
-    },    
-    { PROBE_PLUGIN_FIXTURE_INVERT_LIMIT_SETTING, "Inversion setting for Probe signal during tool measurement.\\n"
-                            "Enable external pin input for probe connected signal.\\n"
-                            "Invert external pin input for probe connected signal.\\n"
-                            "Enable alternate pin input for Tool Probe signal.\\n"
-                            "Invert alternate pin input for Tool Probe signal.\\n"    
-                            "Enable probe motion protection.  Alarm will trip if probe is asserted on non-probing moves (Experimental).\\n"                          
-                            "NOTE: A hard reset of the controller is required after changing this setting."
-    },   
-};
-
-#endif
 
 // Write settings to non volatile storage (NVS).
 static void plugin_settings_save (void)
 {
-    hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&probe_protect_settings, sizeof(probe_protect_settings_t), true);
-}
-
-// Restore default settings and write to non volatile storage (NVS).
-// Default is highest numbered free port.
-static void plugin_settings_restore (void)
-{
-    probe_protect_settings.protect_port = hal.port.num_digital_out ? hal.port.num_digital_out - 1 : 0;
-    probe_protect_settings.tool_port = hal.port.num_digital_out ? hal.port.num_digital_out - 1 : 0;
-    probe_protect_settings.flags.value = 0;
-
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&probe_protect_settings, sizeof(probe_protect_settings_t), true);
 }
 
@@ -504,54 +476,9 @@ static void warning_no_port (uint_fast16_t state)
 // If load fails restore to default values.
 static void plugin_settings_load (void)
 {
-    if(hal.nvs.memcpy_from_nvs((uint8_t *)&probe_protect_settings, nvs_address, sizeof(probe_protect_settings_t), true) != NVS_TransferResult_OK)
-        plugin_settings_restore();
 
-    // Sanity check
-    if(probe_protect_settings.protect_port >= n_ports)
-        probe_protect_settings.protect_port = n_ports - 1;
 
-    if(probe_protect_settings.tool_port >= n_ports)
-        probe_protect_settings.tool_port = n_ports - 2;        
-
-    probe_connect_port = probe_protect_settings.protect_port;
-    nvs_hardlimits = settings.limits.flags.hard_enabled;
-    nvs_invert_probe_pin = settings.probe.invert_probe_pin;
-
-    memcpy(&user_mcode, &hal.user_mcode, sizeof(user_mcode_ptrs_t));
-
-    if(probe_protect_settings.flags.ext_pin){
-        if(ioport_claim(Port_Digital, Port_Input, &probe_connect_port, "Probe Connected")) {
-        } else
-            protocol_enqueue_rt_command(warning_no_port);    
-
-        //Try to register the interrupt handler.
-        if(!(hal.port.register_interrupt_handler(probe_connect_port, IRQ_Mode_Change, set_connected)))
-            protocol_enqueue_rt_command(warning_no_port);
-    }
-
-    if(probe_protect_settings.flags.tool_pin){
-        if(ioport_claim(Port_Digital, Port_Input, &tool_probe_port, "Toolsetter G59.3")) {
-        } else
-            protocol_enqueue_rt_command(warning_no_port);    
-        //Not an interrupt pin.
-    }
 }
-
-// Settings descriptor used by the core when interacting with this plugin.
-static setting_details_t setting_details = {
-    .groups = user_groups,
-    .n_groups = sizeof(user_groups) / sizeof(setting_group_detail_t),
-    .settings = user_settings,
-    .n_settings = sizeof(user_settings) / sizeof(setting_detail_t),
-#ifndef NO_SETTINGS_DESCRIPTIONS
-    .descriptions = probe_protect_settings_descr,
-    .n_descriptions = sizeof(probe_protect_settings_descr) / sizeof(setting_descr_t),
-#endif
-    .save = plugin_settings_save,
-    .load = plugin_settings_load,
-    .restore = plugin_settings_restore
-};
 
 void probe_protect_init (void)
 {
@@ -559,6 +486,8 @@ void probe_protect_init (void)
     probe_connected.value = 0;
 
     //Register function pointers
+    /* disable anything related to probe protection
+
     on_tool_changed = grbl.on_tool_changed;
     grbl.on_tool_changed = tool_changed;
 
@@ -577,49 +506,51 @@ void probe_protect_init (void)
     on_tool_selected = grbl.on_tool_selected;
     grbl.on_tool_selected = onToolSelected;
 
+    */
+
+    SLB_get_state = hal.probe.get_state;
+    hal.probe.get_state = probeSLBGetState;
+
     driver_reset = hal.driver_reset;
     hal.driver_reset = probe_reset;
 
+    //register probing function pointer
+
     //note that these do not chain.
+    /* disable mcodes
     hal.user_mcode.check = mcode_check;
     hal.user_mcode.validate = mcode_validate;
     hal.user_mcode.execute = mcode_execute;   
-    memcpy(&user_mcode, &hal.user_mcode, sizeof(user_mcode_ptrs_t)); 
+    memcpy(&user_mcode, &hal.user_mcode, sizeof(user_mcode_ptrs_t));
+    */
 
-    if(!ioport_can_claim_explicit()) {
+    on_report_options = grbl.on_report_options;
+    grbl.on_report_options = report_options;
 
-        // Driver does not support explicit pin claiming, claim the highest numbered port instead.
+    // Used for setting value validation
+    strcpy(max_port, uitoa(n_ports - 1));
 
-        if((ok = hal.port.num_digital_in > 0)) {
+    // Sanity check
+    if(probe_protect_settings.protect_port >= n_ports)
+        probe_protect_settings.protect_port = n_ports - 1;
 
-            probe_connect_port = hal.port.num_digital_in - 1; //M62 can still be used.
+    tool_probe_port = SLB_TLS_AUX_INPUT;
+    nvs_invert_probe_pin = settings.probe.invert_probe_pin;
 
-            if(hal.port.set_pin_description)
-                hal.port.set_pin_description(Port_Digital, Port_Input, probe_connect_port, "Probe detect implicit");
+    memcpy(&user_mcode, &hal.user_mcode, sizeof(user_mcode_ptrs_t));
 
-            driver_reset = hal.driver_reset;
-            hal.driver_reset = probe_reset;
-
-            on_report_options = grbl.on_report_options;
-            grbl.on_report_options = report_options;
-        }
-
-    } else if((ok = (nvs_address = nvs_alloc(sizeof(probe_protect_settings_t))))) {
-
-        on_report_options = grbl.on_report_options;
-        grbl.on_report_options = report_options;
-
-        settings_register(&setting_details);
-
-        // Used for setting value validation
-        strcpy(max_port, uitoa(n_ports - 1));
-    }
-
+    //claim the TLS pin
+    if(ioport_claim(Port_Digital, Port_Input, &tool_probe_port, "Toolsetter Pin")) {
+    } else
+        protocol_enqueue_rt_command(warning_no_port);    
+    //Not an interrupt pin.
+    
     //need to add some init code to check the pin states (if enabled) and set the connected flag on or off.
+    /*disable probe protection
     probe_state_t probe = hal.probe.get_state();
     if (!probe.connected)
         grbl.enqueue_realtime_command(CMD_PROBE_CONNECTED_TOGGLE);  
-
+    */
     if(!ok)
         protocol_enqueue_rt_command(warning_msg);
 }
