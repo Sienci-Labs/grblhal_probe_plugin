@@ -537,7 +537,7 @@ void probe_protect_init (void)
     tool_probe_port = SLB_TLS_AUX_INPUT;
     nvs_invert_probe_pin = settings.probe.invert_probe_pin;
 
-    memcpy(&user_mcode, &hal.user_mcode, sizeof(user_mcode_ptrs_t));
+    //memcpy(&user_mcode, &hal.user_mcode, sizeof(user_mcode_ptrs_t));
 
     //claim the TLS pin
     if(ioport_claim(Port_Digital, Port_Input, &tool_probe_port, "Toolsetter Pin")) {
