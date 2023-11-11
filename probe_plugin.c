@@ -133,7 +133,6 @@ static void warning_no_port (uint_fast16_t state)
 static void plugin_settings_restore (void)
 {
     probe_plugin_settings.tls_invert = DEFAULT_TLS_SIGNAL_INVERT;
-
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&probe_plugin_settings, sizeof(probe_plugin_settings_t), true);
 }
 
@@ -162,7 +161,7 @@ static setting_details_t setting_details = {
 
 void probe_protect_init (void)
 {
-    bool ok = (n_ports = ioports_available(Port_Digital, Port_Input));
+    bool ok = (n_ports = ioports_available(Port_Digital, Port_Input) && (nvs_address = nvs_alloc(sizeof(probe_plugin_settings_t))));
 
     SLB_get_state = hal.probe.get_state;
     hal.probe.get_state = probeSLBGetState;
