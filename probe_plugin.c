@@ -61,12 +61,16 @@ typedef struct {
     bool tls_invert;
 } probe_plugin_settings_t;
 
+static probe_state_t tls_input = {
+    .connected = On
+};
 
 static uint8_t tool_probe_port;
 static nvs_address_t nvs_address;
 static probe_plugin_settings_t probe_plugin_settings;
 static on_report_options_ptr on_report_options;
 static probe_get_state_ptr SLB_get_state = NULL;
+static probe_configure_ptr SLB_probeConfigure = NULL;
 
 // Add info about our settings for $help and enumerations.
 // Potentially used by senders for settings UI.
@@ -82,7 +86,7 @@ static const setting_detail_t user_settings[] = {
 
 static const setting_descr_t probe_plugin_settings_descr[] = {
     { Setting_InvertTLSPin, "Invert the TLS input ahead of the OR function.\\n\\n"
-                            "NOTE: A hard reset of the controller is required after changing this setting."
+                            "NOTE: A reset of the controller is required after changing this setting."
     }, 
 };
 
@@ -98,9 +102,23 @@ static probe_state_t probeSLBGetState (void)
     //get the probe state from the plugin
 
     //OR the result and return.
-    state.triggered |= hal.port.wait_on_input(Port_Digital, tool_probe_port, WaitMode_Immediate, 0.0f) ^ probe_plugin_settings.tls_invert; 
+    state.triggered |= hal.port.wait_on_input(Port_Digital, tool_probe_port, WaitMode_Immediate, 0.0f) ^ tls_input.inverted; 
 
     return state;
+}
+
+// redirected probing function for SLB OR.
+static void probeSLBConfigure (bool is_probe_away, bool probing)
+{
+    tls_input.inverted = is_probe_away ? probe_plugin_settings.tls_invert : !probe_plugin_settings.tls_invert;
+
+    tls_input.triggered = Off;
+
+    tls_input.is_probing = probing;
+
+    //call the HAL function.
+    if(SLB_probeConfigure)
+        SLB_probeConfigure(is_probe_away, probing);
 }
 
 static void report_options (bool newopt)
@@ -165,6 +183,9 @@ void probe_protect_init (void)
 
     SLB_get_state = hal.probe.get_state;
     hal.probe.get_state = probeSLBGetState;
+
+    SLB_probeConfigure = hal.probe.configure;
+    hal.probe.configure = probeSLBConfigure;
 
     on_report_options = grbl.on_report_options;
     grbl.on_report_options = report_options;
