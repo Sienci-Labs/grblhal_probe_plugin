@@ -65,6 +65,12 @@ static probe_state_t tls_input = {
     .connected = On
 };
 
+static probe_state_t state = {
+    .connected = On
+};
+
+static bool probe_away;
+
 static uint8_t tool_probe_port;
 static nvs_address_t nvs_address;
 static probe_plugin_settings_t probe_plugin_settings;
@@ -95,14 +101,16 @@ static const setting_descr_t probe_plugin_settings_descr[] = {
 // redirected probing function for SLB OR.
 static probe_state_t probeSLBGetState (void)
 {
-    probe_state_t state = {0};
-
     //get the probe state from the HAL
     state = SLB_get_state();
     //get the probe state from the plugin
+    tls_input.triggered = hal.port.wait_on_input(Port_Digital, tool_probe_port, WaitMode_Immediate, 0.0f) ^ tls_input.inverted;
 
-    //OR the result and return.
-    state.triggered |= hal.port.wait_on_input(Port_Digital, tool_probe_port, WaitMode_Immediate, 0.0f) ^ tls_input.inverted; 
+    //OR the result and return, unless it is an away probe in which case AND the result.
+    if(probe_away)
+        state.triggered &= tls_input.triggered;
+    else
+        state.triggered |= tls_input.triggered;
 
     return state;
 }
@@ -110,11 +118,13 @@ static probe_state_t probeSLBGetState (void)
 // redirected probing function for SLB OR.
 static void probeSLBConfigure (bool is_probe_away, bool probing)
 {
-    tls_input.inverted = is_probe_away ? probe_plugin_settings.tls_invert : !probe_plugin_settings.tls_invert;
+    tls_input.inverted = is_probe_away ? !probe_plugin_settings.tls_invert : probe_plugin_settings.tls_invert;
 
     tls_input.triggered = Off;
 
     tls_input.is_probing = probing;
+
+    probe_away = is_probe_away;
 
     //call the HAL function.
     if(SLB_probeConfigure)
